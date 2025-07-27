@@ -1,0 +1,981 @@
+---
+title: "Final Text Project - Sentiment Analysis on Customer Reviews"
+author: "Lu Liu"
+date: "2025-06-22"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    highlight: tango
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Part1 - Introduction
+
+The stakeholder aims to assess customer satisfaction and understand customer attitudes toward their products. To achieve this, we will perform a comprehensive text analysis on a dataset containing customer reviews, along with corresponding product prices and ratings. This analysis will achieve the following goals:
+
+  1. Overall sentiment distribution: are consumers more negative or positive to products?
+  2. What are customers satisfied with? What do they complain about?
+  3. What insights can this text analysis bring to stakeholders?
+
+# Part2 - Data
+
+## 2.1 Detailed description of the dataset:
+    - source: from Kaggle: Flipkart Product reviews with sentiment Dataset,              
+    - URL: https://www.kaggle.com/datasets/niraliivaghani/flipkart-product-customer-reviews-dataset
+    - content: This dataset contains different products, prices, rates, reviews and customers' sentiment to products.
+    - structure: This dataset contains information about Product name, Product price, Rate, Reviews, Summary and Sentiment. 
+    - size: 33.4 MB CSV
+    
+## 2.2 Justification for its selection in relation to your research question(s).
+
+This dataset spans more than 200,000 of different products and corresponding reviews across electronics, fashion, home goods and more, giving a sufficient data to analyze customers' attitude towards products and prices. 
+
+## 2.3 Initial exploratory findings (supported by code and output)
+
+
+Because there are more than 200,000 records and only product names, I extracted a new column "product_type" for further grouping data. After that, I ploted distribution of sentiment and rate. 
+
+```{R}
+library(readr)
+library(dplyr)
+library(stringr)
+
+# 1. Load
+df <- read_csv("Dataset-SA.csv")
+
+# 2. Define your cleaning function
+clean_product_name <- function(product_name) {
+  specs_to_remove <- c("l","lt","liter","hours","playtime","super","extra","titanium")
+  
+  product_name %>%
+    #  Remove “?” marks
+    str_remove_all("\\?+") %>%
+    #  Strip out anything in parentheses
+    str_remove_all("\\([^)]*\\)") %>%
+    #  Keep only alphanumerics and spaces
+    str_remove_all("[^A-Za-z0-9\\s]") %>%
+    #  Remove 1–2 letter tokens or pure numbers
+    str_replace_all("\\b(\\w{1,2}|\\d+)\\b", "") %>%
+    #  Collapse whitespace & lowercase
+    str_squish() %>%
+    str_to_lower() %>%
+    #  Drop any extra specs
+    str_split(" ", simplify = FALSE) %>%
+    lapply(function(words) setdiff(words, specs_to_remove)) %>%
+    lapply(paste, collapse = " ") %>%
+    unlist()
+}
+
+# 3. Apply & assign back
+df <- df %>%
+  mutate(cleaned_name = clean_product_name(product_name))
+
+# 4. Extract the “product_type” = last two words, Title Case
+df <- df %>%
+  mutate(
+    product_type = str_extract(cleaned_name, "(\\b[^\\s]+\\s+[^\\s]+)$"),
+    product_type = str_to_title(product_type)
+  )
+
+# 5. (Optional) Drop generic suffix if it’s “Set” or “Kit”
+drop_suffix <- c("Set", "Kit")
+df <- df %>%
+  mutate(
+    product_type = if_else(
+      word(product_type, -1) %in% drop_suffix,
+      word(product_type, 1) %>% str_to_title(),
+      product_type
+    )
+  )
+
+# 6. Inspect
+df %>%
+  select(product_name, cleaned_name, product_type) %>%
+  slice_head(n = 10) %>%
+  print()
+
+```
+
+```{r}
+library(readr)              # For reading the evidence files
+library(dplyr)              # For sorting through clues
+library(tidyr)              # For organizing our findings
+library(quanteda)           # Our main text analysis toolkit
+library(quanteda.textplots) # For visualizing word patterns
+library(quanteda.textstats) # For statistical analysis of text
+library(ggplot2)            # For creating compelling visual evidence
+df <- df[!is.na(df$Summary) & df$Summary != "", ]
+str(df)
+```
+### 2.3.1 Sentiment Distribution
+
+```{R}
+sentiment_summary <- df %>% 
+  count(Sentiment) %>%                     # counts per label
+  mutate(perc = n / sum(n)) %>%            # share of total
+  arrange(desc(perc))  
+
+sentiment_summary
+
+```
+
+```{R}
+
+library(scales)
+sentiment_summary %>% 
+  ggplot(aes(x = Sentiment, y = perc, fill = Sentiment)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = percent(perc, accuracy = 0.1)),
+            vjust = -0.2, size = 4) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(title = "Sentiment Distribution",
+       x = "Sentiment",
+       y = "Percentage of Reviews") +
+  theme_minimal()
+
+```
+
+I plotted the distribution of sentiment in the dataset, revealing that the majority of reviews are positive. 81.2% of the reviews express a positive sentiment. This indicates a strong overall customer satisfaction and suggests that the dataset is predominantly composed of positive feedback.
+
+### 2.3.2 Rate Distribution
+
+```{R}
+rating_summary <- df %>% 
+  count(Rate) %>%                     
+  mutate(perc = n / sum(n)) %>%         
+  arrange(desc(Rate))                 
+
+```
+
+```{R}
+# Bar-plot of rating percentages
+rating_summary %>% 
+  ggplot(aes(x = factor(Rate), y = perc, fill = factor(Rate))) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = percent(perc, accuracy = 0.1)),
+            vjust = -0.2, size = 4) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(title = "Star-Rating Distribution",
+       x = "Rate (1 = worst, 5 = best)",
+       y = "Percentage of Reviews") +
+  theme_minimal()
+```
+The distribution of ratings shows a similar trend to the sentiment distribution, with most customers expressing positive opinions about the products. Specifically, ratings of 4 and 5 together account for 78.3% of all reviews. 
+
+
+# Part 3- Methodology & Results
+
+## 3.1 Preprocessing
+
+- Corpus Construction: column "Review" is short version of column "Summary". I choose column "Summary" to implement text analysis which has the same sentiment as column "Review".
+- Cleaning and Tokenization
+- Stemming/Lemmatization: I applied stemming to transform -ing/-ed verb and plurals (e.g., “battery”, “batteries”; “deliver”, “delivered”). 
+- Exploration: Include initial explorations (e.g., document lengths, key term frequencies, basic visualizations like word clouds).
+
+```{R}
+# Creating our case file of products
+summary_corpus <- corpus(df, text_field = "Summary")
+
+# Getting a summary of our evidence collection by displaying the first 10 texts
+summary(summary_corpus, n = 10)
+
+# Breaking the text into individual tokens (words), and removing punctuation and numbers
+tokens_summary <- tokens(summary_corpus,
+                         what = "word",
+                         remove_punct = TRUE,
+                         remove_numbers = TRUE)
+
+# Converting all tokens to lowercase
+tokens_summary <- tokens_tolower(tokens_summary)
+
+# Removing common English words that don't add much meaning
+tokens_summary <- tokens_remove(tokens_summary, pattern = stopwords("en"))
+
+# Reducing words to their base forms
+tokens_summary <- tokens_wordstem(tokens_summary, language = "english")
+
+# Let's see what our processed tokens look like
+head(tokens_summary)
+```
+
+
+```{R}
+# Creating our word frequency matrix
+dfm_summary <- dfm(tokens_summary)
+
+# Looking at the size of our evidence matrix
+dfm_summary
+# Trimming our matrix to focus on words that appear in at least 5 documents
+dfm_summary_trimmed <- dfm_trim(dfm_summary, min_docfreq = 3)
+
+# Comparing before and after
+cat("Before cleaning: We had", nfeat(dfm_summary), "unique words\n")
+cat("After cleaning: We have", nfeat(dfm_summary_trimmed), "unique words\n")
+cat("That's a reduction of", 
+    round((1 - nfeat(dfm_summary_trimmed)/nfeat(dfm_summary)) * 100, 1), 
+    "% in the vocabulary size!")
+
+# Finding the top 20 most common words
+top_words <- topfeatures(dfm_summary_trimmed, 20)
+
+# Preparing the data for visualization
+top_words_df <- data.frame(
+  word = names(top_words),
+  frequency = as.numeric(top_words)
+)
+
+# Creating a visual of our top suspects (words)
+ggplot(top_words_df, aes(x = reorder(word, frequency), y = frequency)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 20 Most Frequent Words in Customer Reviews", 
+       subtitle = "What words do customers use most often?",
+       x = "Words", 
+       y = "Frequency") +
+  theme_minimal()
+```
+
+I visualized the top 20 most frequent words in customer reviews. The words "good," "product," and "quality" appeared most frequently, suggesting that the reviews are heavily focused on product quality. This aligns with the overall sentiment distribution, which indicates that the majority of reviews in this dataset are positive. The word cloud below further supports this finding.
+
+```{R}
+# Creating a visual word map (simple word counts)
+textplot_wordcloud(dfm_summary_trimmed, max_words = 100, 
+                   color = RColorBrewer::brewer.pal(8, "Dark2"),
+                   random_order = FALSE, rotation = 0.25)
+
+```
+
+## 3.2 Unsupervised Analysis (Topic Modeling)
+
+- Justification: Explain why the chosen method (e.g., LDA/STM topic modeling, k-means clustering, dimensionality reduction like UMAP/t-SNE) is appropriate for your data and research question.
+
+I chose STM because the reviews and summaries in my dataset are relatively short, which makes word–word co-occurrence too sparse for LDA to produce stable topics. To improve model performance and interpretability, I grouped data by product type, price range, and sentiment and fed these into the STM as prevalence.
+
+
+```{R}
+library(readr)              # For reading files
+library(dplyr)              # For data manipulation
+library(tidyr)              # For data tidying
+library(stringr)            # For string operations
+library(ggplot2)            # For visualization
+library(tidytext)           # For tidy text analysis
+library(stm)                # For topic modeling (both basic and structural)
+
+# Setting a seed for reproducibility
+set.seed(123)
+```
+
+```{R}
+# 1. Compute the breaks
+price_range <- quantile(df$product_price, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+
+# 2. Add a price_range factor column
+df <- df %>%
+  mutate(
+    price_range = cut(
+      product_price,
+      breaks = price_range,
+      labels = c("low", "med", "high"),
+      include.lowest = TRUE
+    )
+  )
+
+# Check your new column
+table(df$price_range)
+df<- df %>%filter(!is.na(price_range))
+
+df <- df[!is.na(df$Summary) & df$Summary != "", ]
+
+library(dplyr)
+
+df_products <- df %>%
+  # 1. group by product_type and sentiment
+  group_by(product_type, Sentiment, price_range) %>%
+  summarise(
+    # collapse all review texts in that bucket into one big “document”
+    text = paste(Summary, collapse = " "),
+    # carry along any summary stats you care about
+    avg_rate     = mean(Rate,       na.rm = TRUE),
+    summary_count = n(),
+    .groups = "drop"
+  ) %>%
+  # 2. make a simple unique ID and numeric index for each bucket
+  mutate(
+    doc_id   = paste(product_type, Sentiment, price_range, sep = "_"),
+    doc_num  = row_number()
+  )
+
+# peek at the first few “documents”
+head(df_products)
+glimpse(df_products)
+
+```
+- Implementation: Detail the implementation, including parameter choices (e.g., selecting K for topic modeling and justifying this choice with metrics or qualitative assessment; number of clusters for k-means; etc.).
+
+
+```{R}
+library(stm)
+
+processed <- textProcessor(
+  documents = df_products$text,
+  metadata = df_products %>% 
+  select (product_type, Sentiment, price_range, avg_rate, summary_count, doc_id, doc_num),
+  customstopwords = c("product", "buy", "item"),
+  lowercase = TRUE,
+  removestopwords = TRUE,
+  removenumbers = TRUE,
+  removepunctuation = TRUE,
+  stem = FALSE,
+  verbose = TRUE
+)
+
+# Prepare documents for modeling, removing infrequent terms
+out <- prepDocuments(
+  documents = processed$documents,
+  vocab = processed$vocab,
+  meta = processed$meta,
+  lower.thresh = 5  # Remove words appearing in fewer than 5 episodes
+)
+
+
+docs  <- out$documents
+vocab <- out$vocab
+meta  <- out$meta
+# Identify the offending rows again
+bad  <- !stats::complete.cases(meta[, c("product_type",
+                                        "Sentiment",
+                                        "price_range",
+                                        "avg_rate")])
+
+
+# Keep only the good rows
+docs_ok <- docs[!bad]
+meta_ok <- meta[!bad, ]
+
+k_search <- searchK(
+  documents = docs_ok,
+  vocab = vocab,
+  K = c(10, 15, 25),  
+  data = meta_ok,
+  prevalence = ~ product_type + Sentiment + price_range + avg_rate,
+  max.em.its = 50,
+  init.type = "Spectral"
+)
+
+plot(k_search)
+```
+Based on the search-K plots, held-out likelihood improves only marginally after 15 topics. Semantic coherence declines less beyond this point, suggesting diminishing interpretability with larger K. The lower bound also increases at a slower rate after K = 15.While K = 10 yields the most coherent topics, residuals are pretty high. Overall, I chose k = 15 here.
+
+```{R}
+new_stm <- stm(
+  documents = docs_ok,
+  vocab = vocab,
+  data = meta_ok,
+  K = 15,
+  prevalence = ~ product_type + Sentiment + price_range + avg_rate ,
+  max.em.its = 50,
+  init.type = "Spectral",
+  seed = 123
+)
+
+summary(new_stm)
+```
+Interpret the stm model
+
+- Interpretation: Interpret the results (e.g., describe the discovered topics/clusters, visualize relation-ships, show example documents).
+
+```{R}
+summary(new_stm)
+```
+Most topics are clearly defined and they don't overlap so much. Some topics share some words like "good", "quality", but for different products. So customers probably have different comments on different products. Topic 4 is very obvious from other topics, because there are some negative words like "bad" and "poor". FREX helped most to interpret, they might not select the most common words, but they offer the vocabulary which is topic-specific and helps to interpret the story. So we further plot the stm by FREX.
+
+```{R}
+plot(new_stm, labeltype = "frex")
+```
+The top 3 topics on "FREX" are Topic 4, 10 and 3. There are negative words including "worst", "poor" and "bad" in topic 4. It is likely quality complaints. Topic 10 and Topic 3 concentrate on reveiwing the products. Topic 6 and Topic 14 express more positively.
+
+```{R}
+
+# Estimate the effect of your covariates on each topic
+
+effect_mod <- estimateEffect(
+  formula   = 1:15 ~ product_type+Sentiment + price_range + avg_rate,
+  stmobj    = new_stm,
+  metadata  = meta_ok,
+  uncertainty = "Global"
+)
+
+topics_to_plot <- c(4, 10, 3, 6)
+par(mar = c(5, 4, 4, 2) + 0.5)  # Slightly larger than default
+plot(effect_mod,
+     covariate = "Sentiment",
+     method    = "difference",
+     cov.value1= "positive",
+     cov.value2= "negative",
+     topics    = topics_to_plot,
+     main      = "Positive vs. Negative Reviews",
+     xlab      = "Difference in Expected Topic Proportion",
+     cex.axis=0.7
+    )
+
+```
+
+
+
+```{R}
+
+## 1 ───── original row indices that survived every filter
+keep_idx <- as.integer(names(docs_ok))   # names(docs_ok) are character -> coerce to int
+
+## 2 ───── harvest the text from the original data frame
+texts_ok <- df_products$text[ keep_idx ]   # same order, same length as docs_ok
+
+## 3 ───── sanity check
+stopifnot(length(texts_ok) == length(docs_ok))  
+
+## I used chatgpt to create "##1, ##2 and ##3", because I met Error in findThoughts(new_stm, texts = texts_ok, n = 3, topics = 4)Number of provided texts and number of documents modeled do not match.
+
+thoughts1_negative <- findThoughts(
+  new_stm,
+  texts = texts_ok,
+  n = 3,
+  topics = 4
+)$docs[[1]]
+
+thoughts2_neutral <- findThoughts(
+  new_stm,
+  texts = texts_ok,
+  n = 3,
+  topics = 3
+)$docs[[1]]
+
+thoughts3_positive <- findThoughts(
+  new_stm,
+  texts = texts_ok,
+  n = 3,
+  topics = 6
+)$docs[[1]]
+
+print(thoughts1_negative)
+
+print(thoughts2_neutral)
+
+print(thoughts3_positive)
+```
+
+According to the result of top topics based on "FREX", I selected the top 5 topics to plot the difference in sentiment. It is confirmed Topic 4 is clearly negative review. Combining with sentiment of topic 10, it is correlated with complaints about clothing product quality. Topic 3 is more neutral and Topic 6 is strongly positive.
+
+Given this finding, I selected Topic 4(negative), Topic 3(neutral) and Topic 6(positive) for further details. In the three reviews of Topic 4, customers complained a lot about the short life-span of products, like "stopped working after 10 days, spoilt within a month and life is not more than 15 days". Negative words, including "very poor", "cheap", "lightweight" and "shaking" repeatedly appear in the comments and reveal customers' concerns about product quality. The churn rate must be relatively high. Reviews like "please don’t buy this product, by doing this you can teach a lesson to cheater manufacturers, replace” uncover the fact that stakeholders(product and marketing managers) should pay more attention to quality control, customer support and brand image.
+
+Reviews of Topic 3 are overall neutral. Customers commented like "quality ok", "not bad", "average" and "worth for money". It tells stakeholders that there is potential to develop this segment of customers to be more loyal and improve their retention rate and CLV(Customer Lifetime Value), when the product quality can be improved or price lower.
+
+Reviews from Topic 6 are pretty positive as plot of difference in sentiment. Customers were very satisfied with products. They commented like "excellent", "very good product" and "good packing". Therefore, their CLV is probably higher. And it is very important and valuable to maintain a good relationship with this group of customers. It is beneficial to further analyze their response to different marketing campaigns and customize suitable marketing campaigns for them.
+
+
+
+
+## 3.3 Supervised Analysis
+
+In this section, you must apply a supervised learning technique for text classification.
+
+
+• Target Variable: Clearly define and prepare your target variable (the categories you want to predict).
+
+We are interested in product_type and customers' reviews(summary). Our target variable is product_type.
+
+```{R}
+library(dplyr) 
+df_products %>%
+  count(product_type, sort = TRUE)
+
+```
+
+We simplified this into a binary classification. We’ll try to predict whether a review is about a popular product type versus any other product category.
+
+Let’s create this new binary outcome variable called product_binary.
+
+```{R}
+
+# 1. Compute counts per type
+type_counts <- df_products %>%
+  count(product_type, name = "cnt")
+
+# 2. Compute cumulative coverage
+cum_counts <- type_counts %>%
+  arrange(desc(cnt)) %>%
+  mutate(cum = cumsum(cnt),
+         pct = cum / sum(cnt))
+head(cum_counts)
+
+# 3. find the row index where pct first ≥ .75
+cut_idx <- which(cum_counts$pct >= 0.75)[1]
+
+# 4. grab the top `cut_idx` types
+popular_types <- cum_counts %>%
+  slice(1:cut_idx) %>%
+  pull(product_type)
+
+# 5. flag every record in the full dataset
+product_processed <- df_products %>%
+  mutate(popular_binary = if_else(
+    product_type %in% popular_types,
+    "popular",
+    "rare"
+  ))
+# 6. check the new row‐level proportions
+product_processed %>%
+  count(popular_binary) %>%
+  mutate(pct = n / sum(n))
+
+
+```
+• Feature Engineering: Use appropriate text representations for classification:
+Glove 
+```{R}
+# Combine lines by product type
+df_by_product <- df_products %>%
+  group_by(product_type) %>%
+  summarize(text = paste(text, collapse = " "))
+
+# Also combine lines by sentiment and avg_rate for document embeddings later
+df_by_sentiment <- df_products %>%
+  group_by(Sentiment, avg_rate) %>%
+  summarize(text = paste(text, collapse = " "),
+            .groups = "drop") %>%
+  mutate(sentiment_id = paste0("S", Sentiment, "R", avg_rate))
+
+
+# Create a corpus from combined lines
+product_corpus <- corpus(df_by_product, text_field = "text")
+sentiment_corpus <- corpus(df_by_sentiment, text_field = "text")
+
+# Tokenize the text
+tokens_product <- tokens(product_corpus,
+                       what = "word",
+                       remove_punct = TRUE,
+                       remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(stopwords("en"))
+
+# Create a vocabulary
+vocab <- tokens_product %>%
+  dfm() %>%
+  dfm_trim(min_termfreq = 5) %>%  # Only keep words that appear at least 5 times
+  featnames()
+length(vocab)
+```
+
+
+```{R}
+set.seed(123)
+# Create a feature co-occurrence matrix (FCM)
+fcm_product <- tokens_product %>%
+  fcm(context = "window", window = 5)  # Consider words within a 5-word window
+
+# Keep only the terms in our vocabulary
+fcm_product <- fcm_select(fcm_product, pattern = vocab)
+
+# Check dimensions of our FCM
+dim(fcm_product)
+
+if(ncol(fcm_product) > 5) {
+  fcm_product[1:5, 1:5]
+}
+
+```
+Train Glove
+```{R}
+library(text2vec)  
+# Set up the GloVe model
+glove_model <- GlobalVectors$new(
+  rank = 50,        # Number of embedding dimensions
+  x_max = 10,       # Maximum count for scaling the weighting function
+  learning_rate = 0.1  # Learning rate
+)
+
+# Fit the GloVe model
+word_vectors <- glove_model$fit_transform(
+  fcm_product,      # The co-occurrence matrix
+  n_iter = 10,     # Number of training iterations
+  convergence_tol = 0.01,  # Convergence tolerance
+  n_threads = 1    # For reproducibility
+)
+
+```
+
+```{R}
+
+# Get context vectors
+context_vectors <- glove_model$components
+
+# Calculate the final word embeddings (word + context vectors)
+word_embeddings <- word_vectors + t(context_vectors)
+
+# Look at the dimensions of our embeddings
+dim(word_embeddings)
+```
+
+Explore the similarity among words
+
+```{R}
+# Function to calculate cosine similarity between vectors
+cosine_similarity <- function(vec1, vec2) {
+  return(sum(vec1 * vec2) / (sqrt(sum(vec1^2)) * sqrt(sum(vec2^2))))
+}
+
+# Function to find similar words
+find_similar_words <- function(word, n = 10) {
+  # Check if word exists in our vocabulary
+  if(!(word %in% rownames(word_embeddings))) {
+    return(paste("Word '", word, "' not in vocabulary"))
+  }
+  
+  # Get the target word's embedding
+  word_vec <- word_embeddings[word, ]
+  
+  # Calculate similarities with all other words
+  similarities <- sapply(rownames(word_embeddings), function(w) {
+    if(w == word) return(0)  # Skip the word itself
+    return(cosine_similarity(word_vec, word_embeddings[w, ]))
+  })
+  
+  # Get the top n most similar words
+  top_indices <- order(similarities, decreasing = TRUE)[1:n]
+  result <- data.frame(
+    word = names(similarities)[top_indices],
+    similarity = similarities[top_indices],
+    stringsAsFactors = FALSE
+  )
+  
+  return(result)
+}
+
+# Find words similar to some terms
+
+
+if("quality" %in% rownames(word_embeddings)) {
+  quality_similar <- find_similar_words("quality")
+  print("Words similar to 'quality':")
+  print(quality_similar)
+}
+
+```
+
+• Model Training: Random Forest and XG Boost
+
+• Validation: Implement a proper validation strategy (e.g., train/test split, cross-validation). 
+
+```{R}
+library(textrecipes)
+library(discrim) 
+library(scales)
+library(LiblineaR)
+library(rsample)
+
+tokens_reviews <- tokens(product_processed$text,
+                         remove_numbers = TRUE,
+                         remove_punct   = TRUE) %>%
+                  tokens_tolower() %>%
+                  tokens_remove(stopwords("en"))
+
+tokens_reviews <- tokens_select(tokens_reviews,
+                                pattern = rownames(word_embeddings),
+                                selection = "keep")
+dfm_reviews <- dfm(tokens_reviews)
+
+tf_mat   <- as(dfm_reviews, "dgCMatrix")         # docs × |vocab|
+doc_emb  <- tf_mat %*% word_embeddings 
+emb_df <- as.data.frame(as.matrix(doc_emb))
+emb_df$popular_binary <- product_processed$popular_binary   # target
+
+# Set the seed again for reproducibility of the split
+set.seed(42) 
+
+# Perform the split (e.g., 75% for training, 25% for testing)
+df_split <- initial_split(emb_df, prop = 0.75, strata = popular_binary)
+
+# Create the training and testing data frames
+df_train <- training(df_split)
+df_test <- testing(df_split)
+
+# Check the dimensions and outcome distribution in each set
+dim(df_train)
+dim(df_test)
+```
+
+
+```{R}
+df_train %>% count(popular_binary) %>% mutate(prop = n / sum(n))
+```
+
+```{R}
+df_test %>% count(popular_binary) %>% mutate(prop = n / sum(n))
+```
+
+```{R}
+# Define the recipe
+df_rec <- recipe(popular_binary ~ ., data = df_train) %>%
+           step_normalize(all_numeric_predictors())
+
+# You can print the recipe to see the steps
+df_rec
+```
+
+```{R}
+
+# Random Forest Specification
+# We'll use 50 trees 
+rf_spec <- rand_forest(trees = 50) %>%
+  set_mode("classification") %>%
+  set_engine("ranger") 
+
+# XGBoost Specification
+# We'll use 50 trees 
+xg_spec <- boost_tree(trees = 50) %>%
+  set_mode("classification") %>%
+  set_engine("xgboost")
+
+library(tidymodels)
+
+# Random Forest Workflow
+rf_wf <- workflow() %>%
+  add_recipe(df_rec) %>% # Use the original recipe
+  add_model(rf_spec)
+
+# XGBoost Workflow
+xg_wf <- workflow() %>%
+  add_recipe(df_rec) %>% # Use the original recipe
+  add_model(xg_spec)
+```
+
+```{R}
+set.seed(6789) # Using a different seed than the book for variety
+
+# Create 10 stratified cross-validation folds from the training data
+review_folds <- vfold_cv(df_train, v = 10, strata = popular_binary)
+
+# Look at the structure of the folds object
+review_folds
+
+# Define our specific metrics
+classification_metrics <- metric_set(accuracy, precision, recall)
+
+# Fit Random Forest (potentially very slow!)
+set.seed(42)
+rf_rs_results <- fit_resamples(
+  rf_wf,
+  resamples = review_folds,
+  metrics = classification_metrics,
+  control = control_resamples(save_pred = FALSE, verbose = TRUE)
+)
+rf_metrics <- collect_metrics(rf_rs_results)
+print("Random Forest Metrics:")
+
+```
+
+```{R}
+print(rf_metrics)
+
+```
+
+```{R}
+# Fit XGBoost
+set.seed(42)
+xg_rs_results <- fit_resamples(
+  xg_wf,
+  resamples = review_folds,
+  metrics = classification_metrics,
+  control = control_resamples(save_pred = FALSE, verbose = TRUE)
+)
+xg_metrics <- collect_metrics(xg_rs_results)
+print("XGBoost Metrics:")
+```
+
+```{R}
+print(xg_metrics)
+
+```
+• Evaluation: Evaluate model performance using relevant metrics (e.g., confusion matrix, accuracy,precision, recall) and interpret the results. Discuss which classes are predicted well and which are not, and potential reasons.
+
+Compare results
+
+```{R}
+# Combine metrics from all models (assuming all were run and metrics stored)
+combined_metrics <- bind_rows(
+  rf_metrics %>% mutate(model = "Random Forest (50 Trees)"),
+  xg_metrics %>% mutate(model = "XGBoost (50 Trees)")
+) %>%
+  select(model, .metric, mean, std_err) %>%
+  arrange(.metric, desc(mean)) # Arrange to see best models per metric
+
+print("Combined Resampling Metrics:")
+```
+
+```{R}
+combined_metrics
+```
+In the lecture, we compared metrics among Naive Bayes, Random Forest and XGBoost. For metrics(accuracy, precision and recall), the performance order is XGBoost > Random Forest > Naive Bayes. In my case, I only implemented and compared metrics between Random Forest and XGBoost. Random Forest has better accuracy and recall than XGBoost, but XGBoost has a better precision. For Random Forest, almost every popular item is caught (high recall), but it mis-labels a noticeable chunk of rare items as popular (precision ~ 0.75). Oppositely, for XGBoost, it has slightly better precision (fewer false positives) but misses more popular items (lower recall). Overall, the performance of Random Forest and XGBoost is not so perfect, maybe logistic Regression fits better.
+
+## 3.4 LLM Application
+
+Integrate one application involving a Large Language Model (LLM) relevant to your project.
+• Choice & Justification: Explain the chosen LLM application (e.g., using an LLM API for zero-shot classification, summarization, or data augmentation) and its relevance to your research question oroverall analysis.
+
+We use LLM application here to obtain the top 10 words in FREX and 5 representative documents under this topic. So when a document and key words assigned, LLM generates more simplified key words for this topic. By setting up this application, we can get simple key words analysis and quickly find products' problems often mentioned in customers' reviews.
+
+• Implementation: Detail how the LLM was used (e.g., R package like text, ellmer, or transformers via reticulate, specific model name like bert-base-uncased, API calls made, prompt engineering if applicable).
+
+
+
+```{R}
+library(ellmer)    # For LLM interactions
+library(purrr)     # For functional programming
+library(jsonlite)  # For JSON handling
+library(stringr)   # For string operations
+library("usethis")
+# Run this once to add your API key to .Renviron
+usethis::edit_r_environ()
+
+```
+
+```{R}
+# Create a chat object
+chat <- chat_openai(
+  model = "gpt-4.1-nano", # Explicitly specify the model
+  system_prompt = "You are a helpful expert in text analysis.",
+  echo = "none"
+)
+
+
+# Send a simple prompt
+response <- chat$chat("What are the key advantages of LLMs?")
+
+# View the response
+cat(response)
+
+# Check token usage
+chat # Shows tokens used
+token_usage() # Shows total usage for the session
+
+# Creating a chat with custom parameters
+chat_precise <- chat_openai(
+  model = "gpt-4.1-nano",
+  api_args = list(
+    temperature = 0  # Lower temperature for more deterministic outputs
+    # max_tokens = 150    # Limit response length
+  )
+)
+
+# Creating a chat for more creative responses
+chat_creative <- chat_openai(
+  model = "gpt-4.1-nano",
+  api_args = list(
+    temperature = 1.5,  # Higher temperature for more varied outputs
+    max_tokens = 300    # Allow for longer responses
+  )
+)
+
+```
+
+
+```{R}
+
+# Define the prompt template exactly as requested
+prompt_template <- "I have topic that contains the following documents: \n[DOCUMENTS] The topic is described by the following keywords: [KEYWORDS] Based on the above information, return a short label of the topic. Return only the topic label."
+
+# Function to generate a topic name using an LLM
+generate_topic_name <- function(topic_id, new_stm, prompt_template) {
+  
+  chat_obj <- chat_openai(
+  model = "gpt-4.1-nano",
+  api_args = list(
+    temperature = 0
+    )
+  )
+
+  # Get the top keywords for this topic (using FREX words)
+  keywords <- paste(labelTopics(new_stm, n = 10)$frex[topic_id,], collapse = ", ")
+  
+  # Get representative documents
+  documents <- findThoughts(
+    new_stm,
+    texts = texts_ok,
+    n = 5,  # Get 5 representative documents
+    topics = topic_id
+  )$docs[[1]]
+  
+  # Format document excerpts
+  formatted_docs <- paste(
+    documents,
+    collapse = "\n \n"
+  )
+  
+  # Replace the placeholders in the prompt template
+  prompt <- gsub("\\[DOCUMENTS\\]", formatted_docs, prompt_template)
+  prompt <- gsub("\\[KEYWORDS\\]", keywords, prompt)
+  
+  # Get LLM response
+  topic_name <- chat_obj$chat(prompt)
+  
+  return(topic_name)
+}
+library(tibble)
+# Generate names for all 20 topics in our model
+all_topics <- 1:15
+topic_labels <- tibble(
+  topic_id = all_topics,
+  stringsAsFactors = FALSE,
+  top_words = "",
+  llm_topic_name = ""
+)
+library(stm)
+# Add the top 5 FREX words for each topic using a loop
+for (i in 1:length(all_topics)) {
+  id <- all_topics[i]
+  topic_labels$top_words[i] <- paste(labelTopics(new_stm, n = 5)$frex[id,], collapse = ", ")
+}
+
+# Generate LLM topic names for each topic using a loop
+for (i in 1:length(all_topics)) {
+  id <- all_topics[i]
+  topic_labels$llm_topic_name[i] <- generate_topic_name(id, new_stm, prompt_template)
+}
+
+# Display the results
+topic_labels_nano <- topic_labels
+
+print(topic_labels_nano)
+
+
+```
+• Analysis: Analyze the results obtained from the LLM application. If comparing with previous methods(e.g., embeddings vs. TF-IDF for classification), present a comparative analysis. Critically assess the LLM’s contribution.
+
+LLM defined 15 distinct themes from customer reviews, ranging from product types like Kitchen Appliances and quality issues. Similar to what we discovered above, Topic 4(worst, bad) is talking about Customer Dissatisfaction with Low-Quality Electronic Products. We found above that Topic 6 includes key words like excellent and good, which transfers a positive attitude. Similarly, it states that customer satisfaction and product quality in topic_labels_nano generated by LLM.
+
+# Part4 - Discussion
+
+Synthesize your findings from all analysis stages. Interpret your overall results in the context of your initial research question(s). Discuss the insights gained.
+
+Prior to grouping the data, we analyzed the overall sentiment distribution and observed that more than 80% of the reviews were positive, while negative sentiments accounted for approximately 13% and neutral for 5%. 78% customers gave at least 4.0 rates. It initially suggested that customers were mostly satisfied. And then we plotted top 20 words by frequency. Words like "good", "product", "nice" and "quality" show up frequently. It seemed that this finding was also consistent with distributions of sentiment and rates. 
+
+Furthermore, we grouped data by sentiment, average rate, price range and product type and implemented stm model. We plotted top topics by FREX and found Topic 4 with negative words is at the first place. It is different from our initial observations from distributions of sentiment. But Topic 6 stays positive. In order to further investigate, we chose 4 top topics and plot the difference in sentiment. It exhibited that Topic 4 and 10 were negative, 3 is neutral and Topic 6 is positive. Overall, it seems that it is not so consistent with our initial findings. Because FREX identifies words that are both common in a topic and rare in others. Negative reviews often use strong, unique words ("worst," "horrible," "waste") that rarely appear in positive reviews. Positive reviews, while more frequent, may rely on generic terms ("good," "nice," "great") that appear across many topics, making them less distinctive. 
+
+After that, we used words embeddings and trained random forest and XGBoost. But the metrics of accuracy and precison didn't perform so well. 
+
+In the end, we applied LLM to generate some simplified topic names. They keep very similar sentiment to the findings of our new_stm models.
+
+# Part5 - Critical Evaluation & Conclusion
+
+Summarize your main findings. Critically evaluate your entire analysis: discuss limitations of your methods and data, potential biases encountered or considered, and how they might have affected your results. Suggest potential improvements.
+
+Initial Sentiment Analysis showed that ~80% of reviews were positive, supported by high average ratings (78% ≥ 4.0 stars). Frequent words (e.g., "good," "nice," "quality") aligned with this trend. But stm model reveals a difference. Top topics by FREX were dominated by negative words. Positive sentiment was dispersed across topics. Words embedding, random forest and XGBoost underperformed. It might suggest here it is better to use logistic regression. The results generated by LLM further confirmed the findings from the interpretaion of stm and plot of difference in sentiment for selected top topics.
+Limitation of my data: I have lots of records, but the column of product name is very messy and long. It is not easy to extract the product type manually. Even if I extracted the product type, there are some values like two-packs as a product type. Not every value in the column "product type " can be properly interpreted. It probably caused the bias, because I applied stm model on grouped data by product type. It maybe can be improved by firstly slicing the data, create the column and manually check again to improve the precision.
+
+
